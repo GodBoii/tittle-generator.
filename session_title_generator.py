@@ -99,12 +99,12 @@ def fetch_session_by_offset(offset: int) -> Optional[Dict[str, Any]]:
 
 
 def session_title_exists(session_id: str, user_id: str) -> bool:
-    """Check whether a title already exists for the given session/user."""
+    """Check whether a usable title already exists for the given session/user."""
 
     try:
         result = (
             supabase_client.from_(SESSION_TITLES_TABLE)
-            .select("session_id")
+            .select("session_id, tittle")
             .eq("session_id", session_id)
             .eq("user_id", user_id)
             .limit(1)
@@ -114,7 +114,12 @@ def session_title_exists(session_id: str, user_id: str) -> bool:
         logger.error("Supabase query failed while checking title existence: %s", exc)
         return False
 
-    return bool(result.data)
+    rows = result.data or []
+    for row in rows:
+        title_value = row.get("tittle")
+        if isinstance(title_value, str) and title_value.strip():
+            return True
+    return False
 
 
 def save_title_entry(session_id: str, user_id: str, title: str) -> None:
@@ -316,7 +321,7 @@ def process_next_session(offset: int) -> Tuple[bool, int]:
             continue
 
         if session_title_exists(session_id, user_id):
-            logger.debug("Title already exists for session %s", session_id)
+            logger.info("Skipping session %s; title already present", session_id)
             current_offset = next_offset
             continue
 
