@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import threading
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -141,8 +142,9 @@ def save_title_entry(
         "user_id": user_id,
         "tittle": title,
     }
-    if created_at:
-        payload["created_at"] = created_at
+    normalized_created_at = _normalize_created_at(created_at)
+    if normalized_created_at:
+        payload["created_at"] = normalized_created_at
     logger.info("Saving title for session %s: %s", session_id, title)
     supabase_client.from_(SESSION_TITLES_TABLE).insert(payload).execute()
 
@@ -260,6 +262,57 @@ def _coerce_to_text(value: Any) -> Optional[str]:
             text = _coerce_to_text(item)
             if text:
                 return text
+    return value
+
+
+def _normalize_created_at(value: Any) -> Optional[str]:
+    """Convert Supabase created_at values into ISO-8601 strings."""
+
+    if value is None:
+        return None
+
+    # Handle numeric timestamps (seconds since epoch)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+
+        if stripped.isdigit():
+            try:
+                return datetime.fromtimestamp(float(stripped), tz=timezone.utc).isoformat()
+            except (OverflowError, OSError, ValueError):
+                return None
+
+        # Accept common timestamp layouts from Supabase/Postgres
+        normalized = stripped.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized).astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f%z",
+            "%Y-%m-%d %H:%M:%S.%f",
+        ):
+            try:
+                dt = datetime.strptime(stripped, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc).isoformat()
+            except ValueError:
+                continue
+
+        # Fall back to returning the original string; Postgres may still accept it
+        return stripped
+
     return None
 
 
