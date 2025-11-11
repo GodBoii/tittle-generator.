@@ -122,7 +122,13 @@ def session_title_exists(session_id: str, user_id: str) -> bool:
     return False
 
 
-def save_title_entry(session_id: str, user_id: str, title: str) -> None:
+def save_title_entry(
+    session_id: str,
+    user_id: str,
+    title: str,
+    *,
+    created_at: Optional[str] = None,
+) -> None:
     """Insert a new title row into the session_titles table."""
 
     payload = {
@@ -130,6 +136,8 @@ def save_title_entry(session_id: str, user_id: str, title: str) -> None:
         "user_id": user_id,
         "tittle": title,
     }
+    if created_at:
+        payload["created_at"] = created_at
     logger.info("Saving title for session %s: %s", session_id, title)
     supabase_client.from_(SESSION_TITLES_TABLE).insert(payload).execute()
 
@@ -338,7 +346,12 @@ def process_next_session(offset: int) -> Tuple[bool, int]:
             continue
 
         try:
-            save_title_entry(session_id, user_id, title)
+            save_title_entry(
+                session_id,
+                user_id,
+                title,
+                created_at=session.get("created_at"),
+            )
             return True, next_offset
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to persist title for session %s: %s", session_id, exc)
