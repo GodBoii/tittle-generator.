@@ -44,9 +44,16 @@ supabase_client = supabase.create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # Logging configuration
 # -----------------------------------------------------------------------------
 
+# Silence noisy httpx logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S"
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -92,15 +99,8 @@ def fetch_session_by_offset(offset: int) -> Optional[Dict[str, Any]]:
     sessions: List[Dict[str, Any]] = response.data or []
 
     if sessions:
-        session = sessions[0]
-        logger.info(
-            "Fetched session %s (offset %d) for processing",
-            session.get("session_id"),
-            offset,
-        )
-        return session
+        return sessions[0]
 
-    logger.info("No additional sessions available for processing (offset %d)", offset)
     return None
 
 
@@ -117,7 +117,7 @@ def session_title_exists(session_id: str, user_id: str) -> bool:
             .execute()
         )
     except Exception as exc:  # noqa: BLE001
-        logger.error("Supabase query failed while checking title existence: %s", exc)
+        logger.error("❌ Failed to check title existence: %s", exc)
         return False
 
     rows = result.data or []
@@ -133,7 +133,7 @@ def save_title_entry(
     user_id: str,
     title: str,
     *,
-    created_at: Optional[str] = None,
+    session_created_at: Optional[Any] = None,
 ) -> None:
     """Insert a new title row into the session_titles table."""
 
@@ -142,10 +142,11 @@ def save_title_entry(
         "user_id": user_id,
         "tittle": title,
     }
-    normalized_created_at = _normalize_created_at(created_at)
-    if normalized_created_at:
-        payload["created_at"] = normalized_created_at
-    logger.info("Saving title for session %s: %s", session_id, title)
+    
+    # Store original session timestamp if available
+    if session_created_at is not None:
+        payload["session_created_at"] = session_created_at
+    
     supabase_client.from_(SESSION_TITLES_TABLE).insert(payload).execute()
 
 
@@ -344,7 +345,7 @@ def generate_title_with_llm(message: str) -> Optional[str]:
         agent = _build_title_agent()
         run_output = agent.run(prompt)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Gemini call failed: %s", exc)
+        logger.error("❌ LLM error: %s", str(exc)[:100])
         return None
     finally:
         agent = None
@@ -380,54 +381,42 @@ def generate_title_with_llm(message: str) -> Optional[str]:
     return title[:120]
 
 
-def process_next_session(offset: int) -> Tuple[bool, int]:
-    """Process sessions starting at offset; returns (title_saved, next_offset)."""
+def process_next_session(offset: int, total_sessions: int) -> Tuple[bool, int, str]:
+    """Process one session at offset; returns (title_saved, next_offset, status_msg)."""
 
-    current_offset = offset
+    session = fetch_session_by_offset(offset)
+    if not session:
+        return False, 0, "end_of_data"
 
-    while True:
-        session = fetch_session_by_offset(current_offset)
-        if not session:
-            logger.debug("Reached end of sessions; restarting from beginning")
-            return False, 0
+    session_id = session.get("session_id")
+    user_id = session.get("user_id")
+    next_offset = offset + 1
 
-        session_id = session.get("session_id")
-        user_id = session.get("user_id")
-        next_offset = current_offset + 1
+    if not session_id or not user_id:
+        return False, next_offset, "missing_ids"
 
-        if not session_id or not user_id:
-            logger.warning("Skipping session without IDs: %s", session)
-            current_offset = next_offset
-            continue
+    if session_title_exists(session_id, user_id):
+        return False, next_offset, "already_titled"
 
-        if session_title_exists(session_id, user_id):
-            logger.info("Skipping session %s; title already present", session_id)
-            current_offset = next_offset
-            continue
+    message = extract_first_user_message(session)
+    if not message:
+        return False, next_offset, "no_message"
 
-        message = extract_first_user_message(session)
-        if not message:
-            logger.warning("No user message found for session %s; skipping", session_id)
-            current_offset = next_offset
-            continue
+    title = generate_title_with_llm(message)
+    if not title:
+        return False, next_offset, "llm_failed"
 
-        title = generate_title_with_llm(message)
-        if not title:
-            logger.warning("LLM did not return a usable title for session %s", session_id)
-            current_offset = next_offset
-            continue
-
-        try:
-            save_title_entry(
-                session_id,
-                user_id,
-                title,
-                created_at=session.get("created_at"),
-            )
-            return True, next_offset
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to persist title for session %s: %s", session_id, exc)
-            current_offset = next_offset
+    try:
+        save_title_entry(
+            session_id,
+            user_id,
+            title,
+            session_created_at=session.get("created_at"),
+        )
+        return True, next_offset, f"✓ {title}"
+    except Exception as exc:  # noqa: BLE001
+        logger.error("❌ Save failed [offset %d]: %s", offset, str(exc)[:100])
+        return False, next_offset, "save_error"
 
 
 # -----------------------------------------------------------------------------
@@ -439,31 +428,50 @@ def run_generator_loop(
 ) -> None:
     """Continuously process sessions until stop_event (if any) is set."""
 
-    if stop_event:
-        logger.info("Starting generator loop with external stop control")
-    else:
-        logger.info("Starting generator loop (CLI mode)")
+    logger.info("🚀 Title generator started")
+
+    # Get total session count once
+    try:
+        count_response = supabase_client.from_(AGNO_SESSIONS_TABLE).select("session_id", count="exact").limit(1).execute()
+        total_sessions = count_response.count or 0
+        logger.info(f"📊 Total sessions in database: {total_sessions}")
+    except Exception as exc:
+        logger.warning(f"⚠️  Could not fetch session count: {exc}")
+        total_sessions = 0
 
     offset = start_offset
     processed = 0
     skipped = 0
+    errors = 0
+    loop_count = 0
+    
     while True:
         if stop_event and stop_event.is_set():
-            logger.info("Stop signal received; exiting generator loop")
+            logger.info("🛑 Stop signal received")
             break
 
-        saved, offset = process_next_session(offset)
+        saved, next_offset, status = process_next_session(offset, total_sessions)
+        
+        if status == "end_of_data":
+            loop_count += 1
+            logger.info(f"🔄 Completed pass #{loop_count} | Processed: {processed} | Skipped: {skipped} | Errors: {errors}")
+            offset = 0
+            skipped = 0
+            errors = 0
+            gc.collect()
+            continue
+        
         if saved:
             processed += 1
-            logger.info(
-                "Generated a title; total processed=%d, continuing with offset %d",
-                processed,
-                offset,
-            )
+            logger.info(f"[{offset}/{total_sessions}] {status}")
         else:
-            logger.info("Verified all sessions; restarting from beginning")
-            offset = 0
-
+            if status in ("no_message", "llm_failed", "save_error", "missing_ids"):
+                errors += 1
+                logger.warning(f"[{offset}/{total_sessions}] ⚠️  {status}")
+            else:
+                skipped += 1
+        
+        offset = next_offset
         gc.collect()
 
 
