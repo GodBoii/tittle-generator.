@@ -1,9 +1,8 @@
 """Generate concise titles for newly created chat sessions.
 
-Designed for serverless use (e.g., Vercel scheduled functions). Each invocation
-scans the `agno_sessions` table until it finds a chat without a title in the
-`session_titles` table, generates a 3–4 word headline via Gemini, saves it, and
-returns. If no sessions need a title, the invocation ends immediately.
+This script finds the next `agno_sessions` row that has not yet received a
+title in the `session_titles` table, extracts the first user message, sends it
+to Google's Gemini model (via agno), and persists the generated 3–4 word title.
 """
 
 from __future__ import annotations
@@ -295,7 +294,7 @@ def generate_title_with_llm(message: str) -> Optional[str]:
     return title[:120]
 
 
-def process_next_session(offset: int = 0) -> Tuple[bool, int]:
+def process_next_session(offset: int) -> Tuple[bool, int]:
     """Process sessions starting at offset; returns (title_saved, next_offset)."""
 
     current_offset = offset
@@ -347,11 +346,17 @@ def process_next_session(offset: int = 0) -> Tuple[bool, int]:
 # -----------------------------------------------------------------------------
 
 def main() -> None:
-    saved, next_offset = process_next_session()
-    if saved:
-        logger.info("Generated a title; next offset %d", next_offset)
-    else:
-        logger.info("No sessions required title generation")
+    logger.info("Starting continuous session title generation loop")
+    offset = 0
+    try:
+        while True:
+            saved, offset = process_next_session(offset)
+            if saved:
+                logger.info("Generated a title; continuing with offset %d", offset)
+            else:
+                logger.info("Verified all sessions; restarting from beginning")
+    except KeyboardInterrupt:
+        logger.info("Session title generator stopped by user")
 
 
 if __name__ == "__main__":
