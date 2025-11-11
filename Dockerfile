@@ -12,5 +12,8 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY session_title_generator.py ./
+COPY server.py ./
 
-CMD ["python", "session_title_generator.py"]
+ENV PORT=10000
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "10000"]

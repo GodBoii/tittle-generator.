@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -339,6 +340,39 @@ def process_next_session(offset: int) -> Tuple[bool, int]:
             current_offset = next_offset
 
 
+# -----------------------------------------------------------------------------
+# Runner utilities
+# -----------------------------------------------------------------------------
+
+def run_generator_loop(
+    *, start_offset: int = 0, stop_event: Optional[threading.Event] = None
+) -> None:
+    """Continuously process sessions until stop_event (if any) is set."""
+
+    if stop_event:
+        logger.info("Starting generator loop with external stop control")
+    else:
+        logger.info("Starting generator loop (CLI mode)")
+
+    offset = start_offset
+    processed = 0
+    skipped = 0
+    while True:
+        if stop_event and stop_event.is_set():
+            logger.info("Stop signal received; exiting generator loop")
+            break
+
+        saved, offset = process_next_session(offset)
+        if saved:
+            processed += 1
+            logger.info(
+                "Generated a title; total processed=%d, continuing with offset %d",
+                processed,
+                offset,
+            )
+        else:
+            logger.info("Verified all sessions; restarting from beginning")
+            offset = 0
 
 
 # -----------------------------------------------------------------------------
@@ -346,15 +380,8 @@ def process_next_session(offset: int) -> Tuple[bool, int]:
 # -----------------------------------------------------------------------------
 
 def main() -> None:
-    logger.info("Starting continuous session title generation loop")
-    offset = 0
     try:
-        while True:
-            saved, offset = process_next_session(offset)
-            if saved:
-                logger.info("Generated a title; continuing with offset %d", offset)
-            else:
-                logger.info("Verified all sessions; restarting from beginning")
+        run_generator_loop()
     except KeyboardInterrupt:
         logger.info("Session title generator stopped by user")
 

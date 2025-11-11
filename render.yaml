@@ -1,8 +1,8 @@
 services:
-  - type: worker
+  - type: web
     name: session-title-generator
     env: docker
-    plan: starter
+    plan: free
     dockerfilePath: ./Dockerfile
     envVars:
       - key: SUPABASE_URL
