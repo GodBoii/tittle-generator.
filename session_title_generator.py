@@ -7,6 +7,7 @@ to Google's Gemini model (via agno), and persists the generated 3–4 word title
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
@@ -55,17 +56,21 @@ MIN_TITLE_WORDS = 3
 MAX_TITLE_WORDS = 4
 AGNO_SESSIONS_TABLE = "agno_sessions"
 SESSION_TITLES_TABLE = "session_titles"
-
-title_agent = Agent(
-    model=Gemini(id="gemini-2.5-flash-lite-preview-09-2025"),
-    instructions=(
-        "Generate a concise title of exactly three or four words that captures "
-        "the user's intent. Respond with plain text only, without quotes or "
-        "additional formatting."
-    ),
-    markdown=False,
-    debug_mode=False,
+TITLE_AGENT_MODEL_ID = "gemini-2.5-flash-lite-preview-09-2025"
+TITLE_AGENT_INSTRUCTIONS = (
+    "Generate a concise title of exactly three or four words that captures "
+    "the user's intent. Respond with plain text only, without quotes or "
+    "additional formatting."
 )
+
+
+def _build_title_agent() -> Agent:
+    return Agent(
+        model=Gemini(id=TITLE_AGENT_MODEL_ID),
+        instructions=TITLE_AGENT_INSTRUCTIONS,
+        markdown=False,
+        debug_mode=False,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -280,10 +285,19 @@ def generate_title_with_llm(message: str) -> Optional[str]:
     if not prompt:
         return None
 
+    agent: Optional[Agent] = None
+    run_output = None
     try:
-        run_output = title_agent.run(prompt)
+        agent = _build_title_agent()
+        run_output = agent.run(prompt)
     except Exception as exc:  # noqa: BLE001
         logger.error("Gemini call failed: %s", exc)
+        return None
+    finally:
+        agent = None
+        gc.collect()
+
+    if not run_output:
         return None
 
     response = getattr(run_output, "content", run_output)
@@ -305,6 +319,11 @@ def generate_title_with_llm(message: str) -> Optional[str]:
         candidate_words = candidate_words[:MIN_TITLE_WORDS]
 
     title = " ".join(word.capitalize() for word in candidate_words)
+
+    # Encourage garbage collection before returning to keep memory stable.
+    del run_output, response, candidate_words
+    gc.collect()
+
     return title[:120]
 
 
@@ -391,6 +410,8 @@ def run_generator_loop(
         else:
             logger.info("Verified all sessions; restarting from beginning")
             offset = 0
+
+        gc.collect()
 
 
 # -----------------------------------------------------------------------------
