@@ -74,7 +74,7 @@ def root() -> dict[str, str]:
 
 
 @app.get("/status")
-def status() -> dict[str, any]:
+def status():
     """Detailed status endpoint for debugging."""
     return {
         "thread_exists": _generator_thread is not None,
