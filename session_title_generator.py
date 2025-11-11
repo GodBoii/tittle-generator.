@@ -49,8 +49,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
+    # Set to DEBUG for detailed logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S"
     )
@@ -384,29 +385,41 @@ def generate_title_with_llm(message: str) -> Optional[str]:
 def process_next_session(offset: int, total_sessions: int) -> Tuple[bool, int, str]:
     """Process one session at offset; returns (title_saved, next_offset, status_msg)."""
 
+    logger.debug(f"🔍 fetch_session_by_offset({offset})")
     session = fetch_session_by_offset(offset)
+    
     if not session:
+        logger.info(f"📭 No session found at offset {offset} - reached end of data")
         return False, 0, "end_of_data"
 
     session_id = session.get("session_id")
     user_id = session.get("user_id")
     next_offset = offset + 1
+    
+    logger.debug(f"🔍 Session {session_id[:8]}... at offset {offset}")
 
     if not session_id or not user_id:
+        logger.warning(f"⚠️  Session at offset {offset} missing IDs: session_id={session_id}, user_id={user_id}")
         return False, next_offset, "missing_ids"
 
     if session_title_exists(session_id, user_id):
+        logger.debug(f"⏭️  Session {session_id[:8]}... already has title")
         return False, next_offset, "already_titled"
 
     message = extract_first_user_message(session)
     if not message:
+        logger.warning(f"⚠️  Session {session_id[:8]}... has no extractable user message")
+        logger.debug(f"🔍 Session data keys: {list(session.keys())}")
         return False, next_offset, "no_message"
 
+    logger.debug(f"🔍 Generating title for message: {message[:50]}...")
     title = generate_title_with_llm(message)
     if not title:
+        logger.warning(f"⚠️  LLM failed to generate title for session {session_id[:8]}...")
         return False, next_offset, "llm_failed"
 
     try:
+        logger.debug(f"💾 Saving title: {title}")
         save_title_entry(
             session_id,
             user_id,
@@ -416,6 +429,7 @@ def process_next_session(offset: int, total_sessions: int) -> Tuple[bool, int, s
         return True, next_offset, f"✓ {title}"
     except Exception as exc:  # noqa: BLE001
         logger.error("❌ Save failed [offset %d]: %s", offset, str(exc)[:100])
+        logger.exception("Full save error:")
         return False, next_offset, "save_error"
 
 
@@ -429,6 +443,9 @@ def run_generator_loop(
     """Continuously process sessions until stop_event (if any) is set."""
 
     logger.info("🚀 Title generator started")
+    logger.info(f"🔧 Thread name: {threading.current_thread().name}")
+    logger.info(f"🔧 Thread daemon: {threading.current_thread().daemon}")
+    logger.info(f"🔧 Stop event provided: {stop_event is not None}")
 
     # Get total session count once
     try:
@@ -444,17 +461,37 @@ def run_generator_loop(
     skipped = 0
     errors = 0
     loop_count = 0
+    iteration = 0
+    
+    logger.info(f"🔁 Starting main loop from offset {offset}")
     
     while True:
+        iteration += 1
+        
+        if iteration % 10 == 0:
+            logger.info(f"💓 Loop heartbeat: iteration {iteration}, offset {offset}")
+        
         if stop_event and stop_event.is_set():
             logger.info("🛑 Stop signal received")
             break
 
-        saved, next_offset, status = process_next_session(offset, total_sessions)
+        logger.debug(f"🔍 Processing offset {offset}")
+        
+        try:
+            saved, next_offset, status = process_next_session(offset, total_sessions)
+            logger.debug(f"🔍 Result: saved={saved}, next_offset={next_offset}, status={status}")
+        except Exception as exc:
+            logger.error(f"💥 FATAL ERROR in process_next_session at offset {offset}: {exc}")
+            logger.exception("Full traceback:")
+            # Continue to next offset on error
+            offset += 1
+            errors += 1
+            continue
         
         if status == "end_of_data":
             loop_count += 1
             logger.info(f"🔄 Completed pass #{loop_count} | Processed: {processed} | Skipped: {skipped} | Errors: {errors}")
+            logger.info(f"🔄 Restarting from offset 0...")
             offset = 0
             skipped = 0
             errors = 0
@@ -470,9 +507,14 @@ def run_generator_loop(
                 logger.warning(f"[{offset}/{total_sessions}] ⚠️  {status}")
             else:
                 skipped += 1
+                if iteration <= 50:  # Log first 50 skips
+                    logger.debug(f"[{offset}/{total_sessions}] {status}")
         
         offset = next_offset
+        logger.debug(f"🔍 Next offset will be: {offset}")
         gc.collect()
+    
+    logger.info(f"🏁 Generator loop exited after {iteration} iterations")
 
 
 # -----------------------------------------------------------------------------
