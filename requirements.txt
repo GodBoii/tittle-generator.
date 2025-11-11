@@ -1,0 +1,4 @@
+python-dotenv
+supabase
+agno
+google-genai
